@@ -1,0 +1,1 @@
+# OpenAlgo MCP package initializer

@@ -1,4 +1,4 @@
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from openalgo import api
 from typing import List, Dict, Any, Optional
 import json
@@ -11,6 +11,9 @@ if len(sys.argv) < 3:
 
 api_key = sys.argv[1]
 host = sys.argv[2]
+
+print("APIKEY : ", api_key)
+print("Host   : ", host)
 
 # Initialize OpenAlgo client with provided arguments
 client = api(api_key=api_key, host=host)
@@ -465,7 +468,7 @@ def get_symbol_info(symbol: str, exchange: str = "NSE", instrument_type: str = N
         elif symbol.upper() in bse_indices and exchange.upper() == "BSE":
             exchange = "BSE_INDEX"
         
-        response = client.get_symbol_info(symbol=symbol, exchange=exchange.upper())
+        response = get_symbol_info(symbol=symbol, exchange=exchange.upper())
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting symbol info: {str(e)}"
@@ -504,20 +507,6 @@ def get_index_symbols(exchange: str = "NSE") -> str:
             "error": f"Unknown exchange: {exchange}. Use NSE or BSE."
         }, indent=2)
 
-@mcp.tool()
-def get_symbol_info(symbol: str, exchange: str = "NSE") -> str:
-    """
-    Get detailed information about a symbol.
-    
-    Args:
-        symbol: Stock symbol
-        exchange: Exchange name
-    """
-    try:
-        response = client.symbol(symbol=symbol.upper(), exchange=exchange.upper())
-        return json.dumps(response, indent=2)
-    except Exception as e:
-        return f"Error getting symbol info: {str(e)}"
 
 @mcp.tool()
 def get_expiry_dates(symbol: str, exchange: str = "NFO", instrument_type: str = "options") -> str:
@@ -648,5 +637,10 @@ def analyzer_toggle(mode: bool) -> dict:
         return {"status": "error", "error": str(e)}
 
 
-if __name__ == "__main__":
+def main():
     mcp.run(transport='stdio')
+
+# exit(1)
+
+if __name__ == "__main__":
+    main()

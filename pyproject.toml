@@ -1,10 +1,25 @@
 [project]
 name = "openalgo-mcp"
-version = "0.1.0"
+version = "0.1.5"
 description = "OpenAlgo MCP Server stub"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "fastmcp>=2.11.2",
     "mcp>=1.12.3",
+    "nest-asyncio>=1.6.0",
     "openalgo>=1.0.21",
 ]
+
+[project.scripts]
+openalgo-mcp = "openalgo_mcp.mcpserver:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.urls]
+Homepage = "https://github.com/p2c2e/openalgo_mcp"
+Repository = "https://github.com/p2c2e/openalgo_mcp"
