@@ -1,16 +1,8 @@
-
-import nest_asyncio
-
-nest_asyncio.apply()
-
 from fastmcp import FastMCP
-import httpx
+from openalgo import api
 from typing import List, Dict, Any, Optional
 import json
 import sys
-import asyncio
-import concurrent.futures
-import threading
 
 
 # Get API key and host from command line arguments
@@ -23,79 +15,11 @@ host = sys.argv[2]
 print("APIKEY : ", api_key)
 print("Host   : ", host)
 
-# Ensure host ends with /
-if not host.endswith('/'):
-    host += '/'
+# Initialize OpenAlgo client with provided arguments
+client = api(api_key=api_key, host=host)
 
 # Create MCP server
 mcp = FastMCP("openalgo")
-
-# HTTP Client class for OpenAlgo API
-class OpenAlgoHTTPClient:
-    def __init__(self, api_key: str, host: str):
-        self.api_key = api_key
-        self.base_url = f"{host}api/v1/"
-        self.headers = {
-            "Content-Type": "application/json"
-        }
-    
-    async def _make_request(self, endpoint: str, data: dict) -> dict:
-        """Make HTTP POST request to OpenAlgo API"""
-        # Add API key to request data
-        data["apikey"] = self.api_key
-        
-        url = f"{self.base_url}{endpoint}"
-        
-        async with httpx.AsyncClient() as client:
-            try:
-                response = await client.post(
-                    url=url,
-                    json=data,
-                    headers=self.headers,
-                    timeout=30.0
-                )
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPError as e:
-                raise Exception(f"HTTP request failed: {str(e)}")
-            except Exception as e:
-                raise Exception(f"Request error: {str(e)}")
-
-# Initialize HTTP client
-http_client = OpenAlgoHTTPClient(api_key, host)
-
-# Helper function to run async functions
-def run_async(coro):
-    """Run async function in sync context, safe for nested event loops."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # No event loop is running, safe to use asyncio.run
-        return asyncio.run(coro)
-    else:
-        # If we're already in an event loop, run in a new thread with its own event loop
-        import queue
-
-        q = queue.Queue()
-
-        def thread_worker():
-            try:
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                result = new_loop.run_until_complete(coro)
-                q.put((result, None))
-            except Exception as e:
-                q.put((None, e))
-            finally:
-                new_loop.close()
-
-        t = threading.Thread(target=thread_worker)
-        t.start()
-        result, error = q.get()
-        t.join()
-        if error:
-            raise error
-        return result
 
 # ORDER MANAGEMENT TOOLS
 
@@ -128,24 +52,24 @@ def place_order(
         disclosed_quantity: Disclosed quantity
     """
     try:
-        data = {
+        params = {
             "strategy": strategy,
             "symbol": symbol.upper(),
             "action": action.upper(),
             "exchange": exchange.upper(),
-            "pricetype": price_type.upper(),  # Note: API uses 'pricetype' not 'price_type'
+            "price_type": price_type.upper(),
             "product": product.upper(),
-            "quantity": str(quantity)  # API expects string
+            "quantity": quantity
         }
         
         if price is not None:
-            data["price"] = str(price)
+            params["price"] = price
         if trigger_price is not None:
-            data["trigger_price"] = str(trigger_price)
+            params["trigger_price"] = trigger_price
         if disclosed_quantity is not None:
-            data["disclosed_quantity"] = str(disclosed_quantity)
+            params["disclosed_quantity"] = disclosed_quantity
             
-        response = run_async(http_client._make_request("placeorder", data))
+        response = client.placeorder(**params)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error placing order: {str(e)}"
@@ -177,27 +101,21 @@ def place_smart_order(
         price: Limit price (optional)
     """
     try:
-        data = {
+        params = {
             "strategy": strategy,
             "symbol": symbol.upper(),
             "action": action.upper(),
             "exchange": exchange.upper(),
-            "pricetype": price_type.upper(),
+            "price_type": price_type.upper(),
             "product": product.upper(),
-            "quantity": str(quantity),
-            "position_size": str(position_size)
+            "quantity": quantity,
+            "position_size": position_size
         }
         
         if price is not None:
-            data["price"] = str(price)
-        else:
-            data["price"] = "0"
+            params["price"] = price
             
-        # Add default values as seen in Postman collection
-        data["trigger_price"] = "0"
-        data["disclosed_quantity"] = "0"
-            
-        response = run_async(http_client._make_request("placesmartorder", data))
+        response = client.placesmartorder(**params)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error placing smart order: {str(e)}"
@@ -213,12 +131,7 @@ def place_basket_order(orders_json: str) -> str:
     """
     try:
         orders = json.loads(orders_json)
-        data = {
-            "strategy": "Python",  # Default strategy
-            "orders": orders
-        }
-        
-        response = run_async(http_client._make_request("basketorder", data))
+        response = client.basketorder(orders=orders)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error placing basket order: {str(e)}"
@@ -248,21 +161,20 @@ def place_split_order(
         price: Limit price (optional)
     """
     try:
-        data = {
-            "strategy": "Python",  # Default strategy
+        params = {
             "symbol": symbol.upper(),
             "exchange": exchange.upper(),
             "action": action.upper(),
-            "quantity": str(quantity),
-            "splitsize": str(split_size),
-            "pricetype": price_type.upper(),
+            "quantity": quantity,
+            "splitsize": split_size,
+            "price_type": price_type.upper(),
             "product": product.upper()
         }
         
         if price is not None:
-            data["price"] = str(price)
+            params["price"] = price
             
-        response = run_async(http_client._make_request("splitorder", data))
+        response = client.splitorder(**params)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error placing split order: {str(e)}"
@@ -294,23 +206,21 @@ def modify_order(
         price: New price (optional)
     """
     try:
-        data = {
-            "orderid": order_id,  # Note: API uses 'orderid' not 'order_id'
+        params = {
+            "order_id": order_id,
             "strategy": strategy,
             "symbol": symbol.upper(),
             "action": action.upper(),
             "exchange": exchange.upper(),
-            "pricetype": price_type.upper(),
+            "price_type": price_type.upper(),
             "product": product.upper(),
-            "quantity": str(quantity),
-            "disclosed_quantity": "0",
-            "trigger_price": "0"
+            "quantity": quantity
         }
         
         if price is not None:
-            data["price"] = str(price)
+            params["price"] = price
             
-        response = run_async(http_client._make_request("modifyorder", data))
+        response = client.modifyorder(**params)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error modifying order: {str(e)}"
@@ -325,12 +235,7 @@ def cancel_order(order_id: str, strategy: str) -> str:
         strategy: Strategy name
     """
     try:
-        data = {
-            "orderid": order_id,  # Note: API uses 'orderid' not 'order_id'
-            "strategy": strategy
-        }
-        
-        response = run_async(http_client._make_request("cancelorder", data))
+        response = client.cancelorder(order_id=order_id, strategy=strategy)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error canceling order: {str(e)}"
@@ -344,11 +249,7 @@ def cancel_all_orders(strategy: str) -> str:
         strategy: Strategy name
     """
     try:
-        data = {
-            "strategy": strategy
-        }
-        
-        response = run_async(http_client._make_request("cancelallorder", data))
+        response = client.cancelallorder(strategy=strategy)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error canceling all orders: {str(e)}"
@@ -364,11 +265,7 @@ def close_all_positions(strategy: str) -> str:
         strategy: Strategy name
     """
     try:
-        data = {
-            "strategy": strategy
-        }
-        
-        response = run_async(http_client._make_request("closeposition", data))
+        response = client.closeposition(strategy=strategy)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error closing positions: {str(e)}"
@@ -385,14 +282,12 @@ def get_open_position(strategy: str, symbol: str, exchange: str, product: str) -
         product: Product type
     """
     try:
-        data = {
-            "strategy": strategy,
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper(),
-            "product": product.upper()
-        }
-        
-        response = run_async(http_client._make_request("openposition", data))
+        response = client.openposition(
+            strategy=strategy,
+            symbol=symbol.upper(),
+            exchange=exchange.upper(),
+            product=product.upper()
+        )
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting open position: {str(e)}"
@@ -409,12 +304,7 @@ def get_order_status(order_id: str, strategy: str) -> str:
         strategy: Strategy name
     """
     try:
-        data = {
-            "orderid": order_id,  # Note: API uses 'orderid' not 'order_id'
-            "strategy": strategy
-        }
-        
-        response = run_async(http_client._make_request("orderstatus", data))
+        response = client.orderstatus(order_id=order_id, strategy=strategy)
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting order status: {str(e)}"
@@ -423,9 +313,7 @@ def get_order_status(order_id: str, strategy: str) -> str:
 def get_order_book() -> str:
     """Get all orders from the order book."""
     try:
-        data = {}  # Only API key is needed
-        
-        response = run_async(http_client._make_request("orderbook", data))
+        response = client.orderbook()
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting order book: {str(e)}"
@@ -434,9 +322,7 @@ def get_order_book() -> str:
 def get_trade_book() -> str:
     """Get all executed trades."""
     try:
-        data = {}  # Only API key is needed
-        
-        response = run_async(http_client._make_request("tradebook", data))
+        response = client.tradebook()
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting trade book: {str(e)}"
@@ -445,9 +331,7 @@ def get_trade_book() -> str:
 def get_position_book() -> str:
     """Get all current positions."""
     try:
-        data = {}  # Only API key is needed
-        
-        response = run_async(http_client._make_request("positionbook", data))
+        response = client.positionbook()
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting position book: {str(e)}"
@@ -456,19 +340,16 @@ def get_position_book() -> str:
 def get_holdings() -> str:
     """Get all holdings (long-term investments)."""
     try:
-        data = {}  # Only API key is needed
-        response = run_async(http_client._make_request("holdings", data))
+        response = client.holdings()
         return json.dumps(response, indent=2)
     except Exception as e:
-        return f"Error 2 getting holdings: {str(e)}"
+        return f"Error getting holdings: {str(e)}"
 
 @mcp.tool()
 def get_funds() -> str:
     """Get account funds and margin information."""
     try:
-        data = {}  # Only API key is needed
-        
-        response = run_async(http_client._make_request("funds", data))
+        response = client.funds()
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting funds: {str(e)}"
@@ -485,12 +366,7 @@ def get_quote(symbol: str, exchange: str = "NSE") -> str:
         exchange: Exchange name
     """
     try:
-        data = {
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper()
-        }
-        
-        response = run_async(http_client._make_request("quotes", data))
+        response = client.quotes(symbol=symbol.upper(), exchange=exchange.upper())
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting quote: {str(e)}"
@@ -505,12 +381,7 @@ def get_market_depth(symbol: str, exchange: str = "NSE") -> str:
         exchange: Exchange name
     """
     try:
-        data = {
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper()
-        }
-        
-        response = run_async(http_client._make_request("depth", data))
+        response = client.depth(symbol=symbol.upper(), exchange=exchange.upper())
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting market depth: {str(e)}"
@@ -534,23 +405,21 @@ def get_historical_data(
         end_date: End date (YYYY-MM-DD)
     """
     try:
-        data = {
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper(),
-            "interval": interval,
-            "start_date": start_date,
-            "end_date": end_date
-        }
-        
-        response = run_async(http_client._make_request("history", data))
-        return json.dumps(response, indent=2)
+        response = client.history(
+            symbol=symbol.upper(),
+            exchange=exchange.upper(),
+            interval=interval,
+            start_date=start_date,
+            end_date=end_date
+        )
+        return str(response)  # DataFrame converted to string
     except Exception as e:
         return f"Error getting historical data: {str(e)}"
 
 # INSTRUMENT SEARCH AND INFO TOOLS
 
 @mcp.tool()
-def search_instruments(query: str, exchange: str = "NSE", instrument_type: Optional[str] = None) -> str:
+def search_instruments(query: str, exchange: str = "NSE", instrument_type: str = None) -> str:
     """
     Search for instruments by name or symbol.
     
@@ -567,18 +436,13 @@ def search_instruments(query: str, exchange: str = "NSE", instrument_type: Optio
             elif exchange.upper() == "BSE":
                 exchange = "BSE_INDEX"
         
-        data = {
-            "query": query,
-            "exchange": exchange.upper()
-        }
-        
-        response = run_async(http_client._make_request("search", data))
+        response = client.search(query=query, exchange=exchange.upper())
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error searching instruments: {str(e)}"
 
 @mcp.tool()
-def get_symbol_info(symbol: str, exchange: str = "NSE", instrument_type: Optional[str] = None) -> str:
+def get_symbol_info(symbol: str, exchange: str = "NSE", instrument_type: str = None) -> str:
     """
     Get detailed information about a symbol.
     
@@ -604,12 +468,7 @@ def get_symbol_info(symbol: str, exchange: str = "NSE", instrument_type: Optiona
         elif symbol.upper() in bse_indices and exchange.upper() == "BSE":
             exchange = "BSE_INDEX"
         
-        data = {
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper()
-        }
-        
-        response = run_async(http_client._make_request("symbol", data))
+        response = get_symbol_info(symbol=symbol, exchange=exchange.upper())
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting symbol info: {str(e)}"
@@ -648,6 +507,7 @@ def get_index_symbols(exchange: str = "NSE") -> str:
             "error": f"Unknown exchange: {exchange}. Use NSE or BSE."
         }, indent=2)
 
+
 @mcp.tool()
 def get_expiry_dates(symbol: str, exchange: str = "NFO", instrument_type: str = "options") -> str:
     """
@@ -659,13 +519,11 @@ def get_expiry_dates(symbol: str, exchange: str = "NFO", instrument_type: str = 
         instrument_type: 'options' or 'futures'
     """
     try:
-        data = {
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper(),
-            "instrumenttype": instrument_type.lower()
-        }
-        
-        response = run_async(http_client._make_request("expiry", data))
+        response = client.expiry(
+            symbol=symbol.upper(),
+            exchange=exchange.upper(),
+            instrumenttype=instrument_type.lower()
+        )
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting expiry dates: {str(e)}"
@@ -674,9 +532,7 @@ def get_expiry_dates(symbol: str, exchange: str = "NFO", instrument_type: str = 
 def get_available_intervals() -> str:
     """Get all available time intervals for historical data."""
     try:
-        data = {}  # Only API key is needed
-        
-        response = run_async(http_client._make_request("intervals", data))
+        response = client.intervals()
         return json.dumps(response, indent=2)
     except Exception as e:
         return f"Error getting intervals: {str(e)}"
@@ -685,12 +541,12 @@ def get_available_intervals() -> str:
 
 @mcp.tool()
 def get_openalgo_version() -> str:
-    """Get the OpenAlgo API version information."""
-    return json.dumps({
-        "message": "Using direct HTTP client instead of openalgo library",
-        "client": "httpx",
-        "version": "Direct API calls"
-    }, indent=2)
+    """Get the OpenAlgo library version."""
+    try:
+        import openalgo
+        return f"OpenAlgo version: {openalgo.__version__}"
+    except Exception as e:
+        return f"Error getting version: {str(e)}"
 
 @mcp.tool()
 def validate_order_constants() -> str:
@@ -725,8 +581,8 @@ def validate_order_constants() -> str:
     }
     return json.dumps(constants, indent=2)
 
-# ANALYZER TOOLS
 
+# Tool to get analyzer status
 @mcp.tool()
 def analyzer_status() -> dict:
     """
@@ -749,12 +605,12 @@ def analyzer_status() -> dict:
         }
     """
     try:
-        data = {}  # Only API key is needed
-        response = run_async(http_client._make_request("analyzer", data))
+        response = client.analyzerstatus()
         return response
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+# Tool to toggle analyzer mode
 @mcp.tool()
 def analyzer_toggle(mode: bool) -> dict:
     """
@@ -775,41 +631,16 @@ def analyzer_toggle(mode: bool) -> dict:
         analyzer_toggle(False) - Switch to live trading mode
     """
     try:
-        data = {
-            "mode": mode
-        }
-        response = run_async(http_client._make_request("analyzer/toggle", data))
+        response = client.analyzertoggle(mode=mode)
         return response
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
 
 def main():
-    # If "--test-holdings" is passed as an argument, test get_holdings directly
-    if "--test-holdings" in sys.argv:
-        print("Testing get_holdings() directly...")
-        print("get_holdings type:", type(get_holdings))
-        print("get_holdings dir:", dir(get_holdings))
-        # Try to call the underlying function if possible
-        def _call_tool_func(obj):
-            if asyncio.iscoroutinefunction(obj):
-                return asyncio.run(obj())
-            return obj()
-
-        if hasattr(get_holdings, "fn"):
-            result = _call_tool_func(get_holdings.fn)
-        elif hasattr(get_holdings, "__wrapped__"):
-            result = _call_tool_func(get_holdings.__wrapped__)
-        elif hasattr(get_holdings, "func"):
-            result = _call_tool_func(get_holdings.func)
-        else:
-            result = "Could not call get_holdings: unknown decorator structure"
-        print("get_holdings() result:")
-        print(result)
-        return
-
     mcp.run(transport='stdio')
 
+# exit(1)
 
 if __name__ == "__main__":
     main()
