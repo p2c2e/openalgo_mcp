@@ -11,6 +11,7 @@ import sys
 import asyncio
 import concurrent.futures
 import threading
+from urllib.parse import urlparse
 
 
 # Get API key and host from command line arguments
@@ -33,10 +34,18 @@ mcp = FastMCP("openalgo")
 # HTTP Client class for OpenAlgo API
 class OpenAlgoHTTPClient:
     def __init__(self, api_key: str, host: str):
+        parsed = urlparse(host)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
         self.api_key = api_key
         self.base_url = f"{host}api/v1/"
         self.headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/plain, */*",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+            "Origin": origin,
+            "Referer": f"{origin}/",
+            "Accept-Language": "en-US,en;q=0.9",
+            "X-Requested-With": "XMLHttpRequest"
         }
     
     async def _make_request(self, endpoint: str, data: dict) -> dict:
@@ -46,16 +55,27 @@ class OpenAlgoHTTPClient:
         
         url = f"{self.base_url}{endpoint}"
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            headers=self.headers,
+            timeout=30.0,
+            http2=True,
+            follow_redirects=True
+        ) as client:
             try:
-                response = await client.post(
-                    url=url,
-                    json=data,
-                    headers=self.headers,
-                    timeout=30.0
-                )
+                response = await client.post(endpoint, json=data)
                 response.raise_for_status()
                 return response.json()
+            except httpx.HTTPStatusError as e:
+                body = ""
+                try:
+                    body = e.response.text if e.response is not None else ""
+                except Exception:
+                    pass
+                status = e.response.status_code if e.response is not None else "unknown"
+                reason = e.response.reason_phrase if e.response is not None else "unknown"
+                url_info = str(e.request.url) if e.request is not None else url
+                raise Exception(f"HTTP request failed: {status} {reason} for url '{url_info}' - Response body: {body[:500]}")
             except httpx.HTTPError as e:
                 raise Exception(f"HTTP request failed: {str(e)}")
             except Exception as e:
@@ -460,7 +480,7 @@ def get_holdings() -> str:
         response = run_async(http_client._make_request("holdings", data))
         return json.dumps(response, indent=2)
     except Exception as e:
-        return f"Error 2 getting holdings: {str(e)}"
+        return f"Error getting holdings: {str(e)}"
 
 @mcp.tool()
 def get_funds() -> str:
