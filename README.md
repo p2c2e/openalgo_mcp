@@ -37,3 +37,23 @@ Addition of an entry similar to below on your favorite MCP Client. The below is 
       ]
     }
 ```
+
+Divergence from upstream
+------------------------
+
+This package talks to the OpenAlgo REST API (`/api/v1/*`) directly over `httpx`. It
+deliberately does **not** depend on the `openalgo` Python library, so installs stay small
+and work on musl/Alpine images (the library ships a Rust `abi3` core with no musllinux
+wheel).
+
+Consequence: the 9 upstream research tools that compute indicators locally via
+`openalgo.ta` (`calculate_indicator`, `get_trend_snapshot`, `get_momentum_snapshot`,
+`get_volatility_snapshot`, `get_support_resistance`, `detect_signals`,
+`screen_instruments`, `multi_timeframe_analysis`, `correlation_beta`) are **not** included.
+They are pure local math, not REST endpoints, so they cannot be proxied. Everything that
+maps to an API endpoint is covered - 40 tools.
+
+`get_historical_data` matches upstream behaviour: `start_date`/`end_date` are optional,
+`bars` (default 20) or `lookback_days` size the window, epoch timestamps are normalised to
+ISO 8601 (IST for intraday intervals), and the response carries `count`/`returned`/
+`truncated` metadata.

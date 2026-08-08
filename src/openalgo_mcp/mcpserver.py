@@ -11,6 +11,8 @@ import sys
 import asyncio
 import threading
 from urllib.parse import urlparse
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 
 # Get API key and host from command line arguments
@@ -919,14 +921,123 @@ def get_market_depth(symbol: str, exchange: str = "NSE") -> str:
         return f"Error getting market depth: {str(e)}"
 
 
-@mcp.tool()
-def get_historical_data(
+# Approx bars per trading day per interval (NSE ~6h15m session). Used only to size
+# the calendar window when fetching by bar-count, so it can be a rough estimate.
+_BARS_PER_DAY = {
+    "1m": 375, "3m": 125, "5m": 75, "10m": 38, "15m": 25, "30m": 13,
+    "1h": 7, "60m": 7, "2h": 4, "3h": 3, "4h": 2,
+    "d": 1, "day": 1, "w": 0.2, "week": 0.2, "m": 0.05, "month": 0.05,
+}
+
+# Intervals the OpenAlgo API returns as already-IST daily-or-coarser bars. Everything
+# else is epoch-UTC and gets converted to IST, matching the SDK's history() behavior.
+_DAILY_OR_COARSER = {"d", "day", "w", "week", "m", "month", "q", "y"}
+
+
+def _iso_timestamp(value: Any, interval: str) -> Any:
+    """Convert an epoch-seconds timestamp to ISO 8601, IST for intraday intervals."""
+    if not isinstance(value, (int, float)):
+        return value
+    try:
+        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return value
+    if interval.lower() in _DAILY_OR_COARSER:
+        # Daily and coarser bars are already IST-dated; keep them naive like the SDK.
+        return dt.replace(tzinfo=None).isoformat()
+    return dt.astimezone(ZoneInfo("Asia/Kolkata")).isoformat()
+
+
+def _history_records(
     symbol: str,
     exchange: str,
     interval: str,
     start_date: str,
     end_date: str,
-    source: str = "api"
+    source: str = "api",
+) -> List[Dict[str, Any]]:
+    """Fetch OHLCV history as a time-sorted, de-duplicated list of records.
+
+    Raises on API failure or an empty window. Timestamps are normalized to ISO 8601
+    (IST for intraday) so callers never have to deal with raw epoch seconds.
+
+    source: 'api' (default) fetches from the broker API; 'db' fetches from the local
+    OpenAlgo Historify DuckDB store (1m/D stored, other intervals computed via SQL,
+    enabling custom intervals like 2m/4m/W/M/Q for research).
+    """
+    payload = {
+        "symbol": symbol.upper(),
+        "exchange": exchange.upper(),
+        "interval": interval,
+        "start_date": start_date,
+        "end_date": end_date,
+        "source": source,
+    }
+    response = run_async(http_client._make_request("history", payload))
+    if not isinstance(response, dict) or response.get("status") != "success":
+        raise ValueError(f"history error: {response}")
+    rows = response.get("data") or []
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("no historical data returned for the given range")
+
+    seen = set()
+    records: List[Dict[str, Any]] = []
+    for row in sorted(rows, key=lambda r: r.get("timestamp", 0) if isinstance(r, dict) else 0):
+        if not isinstance(row, dict):
+            continue
+        raw_ts = row.get("timestamp")
+        if raw_ts in seen:
+            continue
+        seen.add(raw_ts)
+        record = dict(row)
+        record["timestamp"] = _iso_timestamp(raw_ts, interval)
+        records.append(record)
+    if not records:
+        raise ValueError("no historical data returned for the given range")
+    return records
+
+
+def _load_history(
+    symbol: str,
+    exchange: str,
+    interval: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    lookback_bars: int = 252,
+    lookback_days: Optional[int] = None,
+    source: str = "api",
+) -> List[Dict[str, Any]]:
+    """Fetch OHLCV history with a flexible lookback window.
+
+    Resolution priority:
+      1. Explicit start_date (with optional end_date) -> use that range verbatim.
+      2. lookback_days given -> last N calendar days ending today (e.g., "last 30 days").
+      3. else -> last `lookback_bars` bars (default 252 ~ one trading year of daily data):
+         fetch a wide-enough calendar window, then tail to exactly `lookback_bars` rows.
+    """
+    end = end_date or date.today().isoformat()
+    if start_date:
+        return _history_records(symbol, exchange, interval, start_date, end, source)
+    if lookback_days:
+        start = (date.fromisoformat(end) - timedelta(days=int(lookback_days))).isoformat()
+        return _history_records(symbol, exchange, interval, start, end, source)
+    bars_per_day = _BARS_PER_DAY.get(interval.lower(), 75)
+    cal_days = int((lookback_bars / bars_per_day) * 1.6) + 5
+    start = (date.fromisoformat(end) - timedelta(days=cal_days)).isoformat()
+    records = _history_records(symbol, exchange, interval, start, end, source)
+    return records[-int(lookback_bars):]
+
+
+@mcp.tool()
+def get_historical_data(
+    symbol: str,
+    exchange: str,
+    interval: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    source: str = "api",
+    bars: int = 20,
+    lookback_days: Optional[int] = None,
 ) -> str:
     """
     Get historical OHLCV data for a symbol.
@@ -937,25 +1048,38 @@ def get_historical_data(
         interval: Time interval. With source='api': '1m', '3m', '5m', '10m', '15m', '30m', '1h', 'D'.
                   With source='db': also supports custom intervals (2m, 4m, 6m, 7m, 2h, 3h, 4h) and
                   daily-based (W, M, Q, Y plus multiples like 2W, 3M).
-        start_date: Start date (YYYY-MM-DD)
-        end_date: End date (YYYY-MM-DD)
+        start_date: Start date (YYYY-MM-DD). Optional - when omitted, the last `bars`
+                    (default 20) most-recent bars are returned (or `lookback_days` if given).
+        end_date: End date (YYYY-MM-DD). Optional - defaults to today.
         source: 'api' (default) fetches from broker API. 'db' fetches from the local
                 OpenAlgo Historify DuckDB store (1m/D stored, other intervals computed via SQL).
+        bars: Number of most-recent bars to return (default 20). The window is fetched
+              server-side; only the last `bars` rows are sent back to keep the payload small.
+              Increase only if you explicitly need more rows.
+        lookback_days: When dates are omitted, fetch the last N calendar days instead of a
+                       bar-count window (e.g., 30 for "last 30 days").
 
     Returns:
-        JSON with count and data (list of {timestamp, open, high, low, close, volume}).
+        JSON with total count, returned count, a truncated flag, and data (list of
+        {timestamp, open, high, low, close, volume}) - the last `bars` rows.
     """
     try:
-        data = {
-            "symbol": symbol.upper(),
-            "exchange": exchange.upper(),
-            "interval": interval,
-            "start_date": start_date,
-            "end_date": end_date,
-            "source": source,
-        }
-        response = run_async(http_client._make_request("history", data))
-        return json.dumps(response, indent=2, default=str)
+        # Fetch enough to satisfy `bars` (min 252) unless an explicit range/lookback is given.
+        records = _load_history(
+            symbol, exchange, interval, start_date, end_date, max(252, bars), lookback_days, source
+        )
+        total = len(records)
+        return json.dumps(
+            {
+                "count": total,
+                "returned": min(bars, total),
+                "truncated": total > bars,
+                "bars": bars,
+                "data": records[-bars:] if bars else records,
+            },
+            indent=2,
+            default=str,
+        )
     except Exception as e:
         return f"Error getting historical data: {str(e)}"
 
